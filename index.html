@@ -98,6 +98,7 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--cyan);outline-offse
 /* ---------- stats strip ---------- */
 .stats{border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:rgba(10,19,40,.85)}
 .stats ul{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(5,1fr)}
+@media (min-width:981px){.stats ul{margin-inline:auto}}
 .stats li{display:flex;align-items:center;gap:.8rem;padding:1.3rem 1rem;border-left:1px solid var(--line)}
 .stats li:first-child{border-left:0}
 .stats svg{flex:none;width:34px;height:34px;color:#D6DEEA}
