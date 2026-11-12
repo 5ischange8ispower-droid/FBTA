@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' data:; base-uri 'self'; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://api.mainnet.solana.com https://api.mainnet-beta.solana.com https://solana-rpc.publicnode.com https://fonts.googleapis.com https://fonts.gstatic.com; form-action 'self'; upgrade-insecure-requests">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' data:; base-uri 'self'; object-src 'none'; script-src 'sha256-Wm5aQ3yQR2K8vDUCaOjXAgq51KaqUfuu5z1toTJFghA='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://api.mainnet.solana.com https://api.mainnet-beta.solana.com https://solana-rpc.publicnode.com https://fonts.googleapis.com https://fonts.gstatic.com; form-action 'self'; upgrade-insecure-requests">
 <title>FBTA | Official site of the FBTA token on Solana</title>
 <meta name="description" content="Official website of FBTA, an SPL token on Solana. Verify the mint address, token details, and where FBTA can be found.">
 <meta property="og:title" content="FBTA | Solana token">
@@ -406,82 +406,117 @@ $("copyBtn").addEventListener("click", async () => {
   });
 })();
 
-/* live on-chain read, with a second RPC as backup */
-function set(id, text, cls) { const el = $(id); el.textContent = text; el.className = "v " + cls; }
+/* FBTA security update: validate RPC data before rendering or arithmetic. */
+function set(id, text, cls) {
+  const el = $(id);
+  el.textContent = text;
+  el.className = "v " + cls;
+}
 function fmtSupply(raw, dec) {
-  const big = BigInt(raw), base = 10n ** BigInt(dec);
+  if (typeof raw !== "string" || !/^(0|[1-9][0-9]{0,19})$/.test(raw) ||
+      !Number.isInteger(dec) || dec < 0 || dec > 255) {
+    throw new Error("Invalid mint supply or decimals");
+  }
+  const big = BigInt(raw);
+  if (big > 18446744073709551615n) throw new Error("Mint supply exceeds u64");
+  const base = 10n ** BigInt(dec);
   const whole = (big / base).toLocaleString("en-US");
   const frac = (big % base).toString().padStart(dec, "0").replace(/0+$/, "");
-  return frac ? `${whole}.${frac}` : whole;
+  return frac ? whole + "." + frac : whole;
+}
+function checkedMintInfo(value) {
+  const parsed = value && value.data && value.data.parsed;
+  const i = parsed && parsed.info;
+  if (!parsed || parsed.type !== "mint" || !i ||
+      typeof i !== "object" || Array.isArray(i)) {
+    throw new Error("Invalid mint response");
+  }
+  const validAuthority = a => a === null ||
+    (typeof a === "string" && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(a));
+  if (!validAuthority(i.mintAuthority) || !validAuthority(i.freezeAuthority)) {
+    throw new Error("Invalid mint authority");
+  }
+  return {
+    decimals: i.decimals,
+    supplyText: fmtSupply(i.supply, i.decimals),
+    mintActive: i.mintAuthority !== null,
+    freezeActive: i.freezeAuthority !== null
+  };
 }
 async function readMint(rpc) {
-  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 8000);
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 8000);
   try {
-    const r = await fetch(rpc, { method: "POST", signal: ctl.signal, headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getAccountInfo", params: [MINT, { encoding: "jsonParsed" }] }) });
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    const r = await fetch(rpc, {
+      method: "POST", signal: ctl.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "getAccountInfo",
+        params: [MINT, { encoding: "jsonParsed" }]
+      })
+    });
+    if (!r.ok) throw new Error("RPC HTTP error");
     const j = await r.json();
-    if (j.error) throw new Error(j.error.message);
-    return j.result ? j.result.value : null;
-  } finally { clearTimeout(t); }
+    if (!j || typeof j !== "object" || Array.isArray(j) || j.error || !j.result) {
+      throw new Error("Invalid RPC response");
+    }
+    return checkedMintInfo(j.result.value);
+  } finally {
+    clearTimeout(t);
+  }
+}
+function showUnavailableTokenFacts() {
+  ["f-decimals", "f-supply", "f-mintauth", "f-freeze"].forEach(
+    id => set(id, "See Solscan", "pending")
+  );
+  const link = document.createElement("a");
+  link.href = "https://solscan.io/token/" + MINT;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = "Solscan";
+  $("rpcNote").replaceChildren(
+    document.createTextNode("Live stats couldn't be verified right now. Retrying automatically. You can also verify on "),
+    link,
+    document.createTextNode(".")
+  );
 }
 let tokenRefreshBusy = false;
-
 async function refreshTokenFacts() {
   if (tokenRefreshBusy) return;
   tokenRefreshBusy = true;
-
   try {
-    let v, lastErr;
-
+    let info;
     for (const rpc of RPCS) {
       try {
-        v = await readMint(rpc);
-        lastErr = null;
+        info = await readMint(rpc);
         break;
-      } catch (e) {
-        lastErr = e;
+      } catch {
+        /* Try the next public RPC, including after malformed responses. */
       }
     }
-
-    const sol = "https://solscan.io/token/" + MINT;
-
-    if (lastErr || !v || !v.data || !v.data.parsed || v.data.parsed.type !== "mint") {
-      ["f-decimals","f-supply","f-mintauth","f-freeze"].forEach(id => set(id, "See Solscan", "pending"));
-
-      $("rpcNote").innerHTML = (v === null && !lastErr)
-        ? `This mint address was not found on Solana. Do not trade until it is confirmed on <a href="${sol}" target="_blank" rel="noopener noreferrer">Solscan</a>.`
-        : `Live stats couldn't load from Solana right now. Retrying automatically. You can also verify on <a href="${sol}" target="_blank" rel="noopener noreferrer">Solscan</a>.`;
-
+    if (!info) {
+      showUnavailableTokenFacts();
       return;
     }
-
-    const i = v.data.parsed.info;
-
-    set("f-decimals", String(i.decimals), "");
-    set("f-supply", fmtSupply(i.supply, i.decimals), "");
-    set("f-mintauth", i.mintAuthority ? "Active" : "Disabled", i.mintAuthority ? "warn" : "ok");
-    set("f-freeze", i.freezeAuthority ? "Active" : "Disabled", i.freezeAuthority ? "warn" : "ok");
-
+    set("f-decimals", String(info.decimals), "");
+    set("f-supply", info.supplyText, "");
+    set("f-mintauth", info.mintActive ? "Active" : "Disabled", info.mintActive ? "warn" : "ok");
+    set("f-freeze", info.freezeActive ? "Active" : "Disabled", info.freezeActive ? "warn" : "ok");
     const updated = new Date().toLocaleTimeString([], {
-      hour: "numeric",
-      minute: "2-digit",
-      second: "2-digit"
+      hour: "numeric", minute: "2-digit", second: "2-digit"
     });
-
     $("rpcNote").textContent =
       "Live from Solana mainnet. Updated " + updated +
       ". Refreshes automatically every 60 seconds.";
-
+  } catch {
+    showUnavailableTokenFacts();
   } finally {
     tokenRefreshBusy = false;
   }
 }
 
 refreshTokenFacts();
-
 setInterval(refreshTokenFacts, 60000);
-
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refreshTokenFacts();
 });
